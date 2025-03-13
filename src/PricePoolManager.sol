@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Hooks} from "@v4-core/libraries/Hooks.sol";
 import {PoolManager} from "@v4-core/PoolManager.sol";
 import {IPoolManager} from "@v4-core/interfaces/IPoolManager.sol";
 import {PoolModifyLiquidityTest} from "@v4-core/test/PoolModifyLiquidityTest.sol";
@@ -11,8 +12,11 @@ import {StateLibrary} from "@v4-core/libraries/StateLibrary.sol";
 import {LiquidityAmounts} from "@v4-periphery/libraries/LiquidityAmounts.sol";
 import {TickMath} from "@v4-core/libraries/TickMath.sol";
 import {SafeCast} from "@v4-core/libraries/SafeCast.sol";
+import {HookMiner} from "contracts/utils/HookMiner.sol";
 import {IHooks} from "@v4-core/interfaces/IHooks.sol";
 import {IChainlinkOracle} from "./interfaces/IChainlinkOracle.sol";
+
+import {OracleBasedFeeHook} from "src/OracleBasedFeeHook.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
@@ -27,7 +31,7 @@ contract PricePoolManager {
     using StateLibrary for IPoolManager;
     using SafeCast for uint128;
 
-    IPoolManager public immutable manager;
+    IPoolManager public immutable poolManager;
     PoolModifyLiquidityTest public immutable lpRouter;
     IChainlinkOracle public immutable oracle;
 
@@ -40,10 +44,13 @@ contract PricePoolManager {
     address public token0;
     address public token1;
 
-    int24 public constant MIN_TICK = -887272;
-    int24 public constant MAX_TICK = 887272;
+    int24 public constant MIN_TICK = -887220;
+    int24 public constant MAX_TICK = 887220;
     uint24 public constant SWAP_FEE = 0x800000;
     int24 public constant TICK_SPACING = 60;
+
+    address public immutable create2 = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    address public immutable calcLib = 0xDCbc7a9B253c89d4257B34Fa52F69d82D09AbdCa;
 
     constructor(
         address _poolManager,
@@ -53,7 +60,7 @@ contract PricePoolManager {
         address _sETH,
         address _sUSDC
     ) {
-        manager = PoolManager(_poolManager);
+        poolManager = PoolManager(_poolManager);
         lpRouter = PoolModifyLiquidityTest(_lpRouter);
         hook = IHooks(_hook);
         oracle = IChainlinkOracle(_oracle);
@@ -88,19 +95,31 @@ contract PricePoolManager {
     }
 
     function initiatePool(int256 amount) external returns (PoolKey memory newPoolKey) {
+        // Deploy Hook
+        uint160 flags = uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG);
+
+        (, bytes32 salt) = HookMiner.find(
+            address(this),
+            flags,
+            type(OracleBasedFeeHook).creationCode,
+            abi.encode(IPoolManager(poolManager), address(calcLib))
+        );
+
+        OracleBasedFeeHook newHook = new OracleBasedFeeHook{salt: salt}(IPoolManager(poolManager), address(calcLib));
+
         // Initialize Pool
         newPoolKey = PoolKey({
             currency0: Currency.wrap(token0),
             currency1: Currency.wrap(token1),
             fee: SWAP_FEE,
             tickSpacing: TICK_SPACING,
-            hooks: IHooks(hook)
+            hooks: IHooks(newHook)
         });
 
         IPoolManager.ModifyLiquidityParams memory param =
             IPoolManager.ModifyLiquidityParams(MIN_TICK, MAX_TICK, amount, 0);
 
-        manager.initialize(newPoolKey, this.getSqrtPriceX96(this.getCurrentPoolPrice()), new bytes(0));
+        poolManager.initialize(newPoolKey, this.getSqrtPriceX96(this.getCurrentPoolPrice()), new bytes(0));
         lpRouter.modifyLiquidity(newPoolKey, param, new bytes(0));
 
         // Set Current Pool Key
@@ -110,11 +129,11 @@ contract PricePoolManager {
     function recreatePoolWithCurrentPrice() external {
         // Get Pool Current SqrtX96 Price
         PoolId poolId = poolKey.toId();
-        (uint160 sqrtPriceX96,,,) = manager.getSlot0(poolId);
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
         // Get Pool Balance of sETH and sUSDC
-        uint256 token0Amount = ERC20(token0).balanceOf(address(manager));
-        uint256 token1Amount = ERC20(token1).balanceOf(address(manager));
+        uint256 token0Amount = ERC20(token0).balanceOf(address(poolManager));
+        uint256 token1Amount = ERC20(token1).balanceOf(address(poolManager));
 
         // Get Current Liquidity
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(

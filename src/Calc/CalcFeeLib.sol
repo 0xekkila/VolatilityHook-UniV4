@@ -34,7 +34,7 @@ contract CalcFeeLib is ICalcFee, Ownable {
         return calcFeeBips(volume, oracle.getVolatility(), sqrtPriceLimit);
     }
 
-    function calculateFee(uint256 volume, uint256 rv) public view returns (uint256) {
+    function calculateFee(uint256 volume, uint256 rv) private view returns (uint256) {
         uint256 scaled_volume = fixedPointDivide(volume, ETH_VOL_SCALE);
 
         // multiply rv by 1 ether o account for representation of 0.6 as 0.6 ether
@@ -47,7 +47,7 @@ contract CalcFeeLib is ICalcFee, Ownable {
         return fee_per_lot / 1 ether;
     }
 
-    function calcFeeBips(uint256 volume, uint256 rv, uint256 sqrtX96Price) public view returns (uint24) {
+    function calcFeeBips(uint256 volume, uint256 rv, uint256 sqrtX96Price) private view returns (uint24) {
         uint256 fee_per_lot = calculateFee(volume, rv);
         uint256 price = ((sqrtX96Price * sqrtX96Price) >> (2 * X96_BITS)) << X96_BITS;
 
